@@ -1,0 +1,318 @@
+Option Explicit
+
+' ==============================================================================
+' --- SENSITIVITY ANALYSIS MACRO (OPTIMIZED FOR SPEED) ---
+' This macro uses in-memory arrays for bulk reading and writing to maximize
+' speed while processing a large number of files.
+' ==============================================================================
+
+' --- MAIN SUBROUTINE ---
+Sub RunSensitivityAnalysis()
+
+    ' --- 1. SETUP & CONFIGURATION ---
+    Dim App As Excel.Application
+    Dim ControlSheet As Worksheet
+    Dim LogSheet As Worksheet
+    Dim MainReport As Workbook
+    Dim Model As Workbook
+    
+    Dim MainReportPath As String
+    Dim ModelsFolderPath As String
+    
+    Dim LastRow As Long
+    Dim i As Long
+    Dim LogRow As Long
+    
+    ' --- NEW: Timer and Counter Variables ---
+    Dim StartTime As Double, EndTime As Double, TotalSeconds As Long
+    Dim TotalFiles As Long, ProcessedCount As Long
+    
+    ' Start the timer
+    StartTime = Timer
+    
+    ' Set up the application environment for maximum speed
+    Set App = Application
+    App.ScreenUpdating = False
+    App.DisplayAlerts = False
+    App.EnableEvents = False
+    App.Calculation = xlCalculationManual ' Switch to manual calculation
+    
+    ' Clear any previous log and set up the new one
+    On Error Resume Next
+    App.Worksheets("Verification_Log").Delete
+    On Error GoTo 0
+    Set LogSheet = App.Worksheets.Add(After:=App.Worksheets(App.Worksheets.Count))
+    LogSheet.Name = "Verification_Log"
+    
+    ' Read configuration paths from the "Control Panel" sheet
+    Set ControlSheet = ThisWorkbook.Worksheets("Control Panel")
+    MainReportPath = ControlSheet.Range("B1").Value
+    ModelsFolderPath = ControlSheet.Range("B2").Value
+    
+    Debug.Print "--- Starting Analysis at " & Now() & " ---"
+    
+    ' --- 2. CREATE LOG HEADERS ---
+    CreateLogHeaders LogSheet
+    
+    ' --- 3. BULK READ THE MAIN REPORT ---
+    On Error GoTo ErrorHandler
+    Set MainReport = App.Workbooks.Open(MainReportPath, UpdateLinks:=0, ReadOnly:=True)
+    
+    Dim ReportSheet As Worksheet
+    Set ReportSheet = MainReport.Worksheets("In_Process_Summary")
+    
+    LastRow = ReportSheet.Cells(ReportSheet.Rows.Count, "A").End(xlUp).Row
+    
+    If LastRow < 10 Then
+        MsgBox "No data found to process in the 'In_Process_Summary' sheet.", vbExclamation
+        GoTo CleanUp
+    End If
+    
+    ' Read the entire project list into an array in one operation
+    Dim ReportData As Variant
+    ReportData = ReportSheet.Range("A10:N" & LastRow).Value ' Read up to Column N
+    
+    MainReport.Close SaveChanges:=False
+    Set MainReport = Nothing
+    
+    ' --- NEW: Get total file count ---
+    TotalFiles = UBound(ReportData, 1)
+    Debug.Print "Read " & TotalFiles & " projects into memory."
+    
+    ' --- 4. PREPARE LOG ARRAY & MAIN LOOP ---
+    Dim LogData() As Variant
+    ReDim LogData(1 To TotalFiles, 1 To 25) ' Resize array to fit all results
+    LogRow = 0
+    ProcessedCount = 0
+    
+    For i = 1 To TotalFiles
+        Dim DealName As String, FileName As String, JVID As String, FilePath As String
+        
+        DealName = CStr(ReportData(i, 14)) ' Column N
+        FileName = CStr(ReportData(i, 10)) ' Column J
+        JVID = CStr(ReportData(i, 9))     ' Column I
+        
+        ' --- NEW: Increment counter ---
+        ProcessedCount = ProcessedCount + 1
+        
+        If FileName = "" Or IsEmpty(FileName) Or FileName = "#N/A" Then GoTo NextIteration
+        
+        ' --- NEW: Update progress in debug window ---
+        Dim ElapsedSeconds As Long, ElapsedTime As String
+        ElapsedSeconds = Round(Timer - StartTime, 0)
+        ElapsedTime = Format(ElapsedSeconds / 86400, "hh:mm:ss")
+        Debug.Print "Processing [" & ProcessedCount & "/" & TotalFiles & "]: " & FileName & " (Elapsed: " & ElapsedTime & ")"
+        
+        FilePath = ModelsFolderPath & "\" & FileName
+        
+        If Dir(FilePath) = "" Then
+            Debug.Print "  --> File not found: " & FilePath & ". Skipping."
+            GoTo NextIteration
+        End If
+        
+        Set Model = App.Workbooks.Open(FilePath, UpdateLinks:=0)
+        
+        Dim ModelVersion As String
+        ModelVersion = Trim(CStr(Model.Worksheets("Instructions & Print").Range("G3").Value))
+        
+        Dim Mapping As Object
+        Set Mapping = GetCellMapping(ModelVersion)
+        
+        If Mapping Is Nothing Then
+            Debug.Print "  --> No mapping found for version: " & ModelVersion
+            Model.Close SaveChanges:=False
+            GoTo NextIteration
+        End If
+        
+        Dim CommCapRate As Double, ResCapRate As Double
+        Dim CommCapSheet As Worksheet, ResCapSheet As Worksheet
+        
+        Set CommCapSheet = Model.Worksheets(Mapping("CommCapSheet"))
+        CommCapRate = CommCapSheet.Range(Mapping("CommCapCell")).Value
+        
+        If Mapping.Exists("ResCapSheet") Then
+            Set ResCapSheet = Model.Worksheets(Mapping("ResCapSheet"))
+            ResCapRate = ResCapSheet.Range(Mapping("ResCapCell")).Value
+        End If
+        
+        ' --- Write initial data to the log array ---
+        LogRow = LogRow + 1
+        LogData(LogRow, 1) = DealName
+        LogData(LogRow, 2) = FileName
+        LogData(LogRow, 3) = JVID
+        LogData(LogRow, 4) = ModelVersion
+        LogData(LogRow, 5) = CommCapSheet.Range(Mapping("CommCapLabel")).Value
+        LogData(LogRow, 6) = CommCapRate
+        If Mapping.Exists("ResCapSheet") Then
+            LogData(LogRow, 7) = ResCapSheet.Range(Mapping("ResCapLabel")).Value
+            LogData(LogRow, 8) = ResCapRate
+        End If
+        
+        Dim Scenarios(1 To 4) As Double
+        Scenarios(1) = -0.005: Scenarios(2) = -0.0025: Scenarios(3) = 0.0025: Scenarios(4) = 0.005
+        
+        Dim s As Long, CurrentCol As Long
+        CurrentCol = 9 ' Start writing scenario results in column I of the array
+        
+        For s = 1 To 4
+            CommCapSheet.Range(Mapping("CommCapCell")).Value = CommCapRate + Scenarios(s)
+            If Mapping.Exists("ResCapSheet") Then
+                ResCapSheet.Range(Mapping("ResCapCell")).Value = ResCapRate + Scenarios(s)
+            End If
+            
+            App.Calculate ' Trigger calculation
+            
+            Dim PartnerGain As Double, CompanyGain As Double
+            PartnerGain = Model.Worksheets(Mapping("PartnerGainSheet")).Range(Mapping("PartnerGainCell")).Value
+            CompanyGain = Model.Worksheets(Mapping("CompanyGainSheet")).Range(Mapping("CompanyGainCell")).Value
+            
+            ' Write scenario data to the log array
+            LogData(LogRow, CurrentCol) = Model.Worksheets(Mapping("PartnerGainSheet")).Range(Mapping("PartnerGainLabel")).Value
+            LogData(LogRow, CurrentCol + 1) = PartnerGain
+            LogData(LogRow, CurrentCol + 2) = Model.Worksheets(Mapping("CompanyGainSheet")).Range(Mapping("CompanyGainLabel")).Value
+            LogData(LogRow, CurrentCol + 3) = CompanyGain
+            
+            CurrentCol = CurrentCol + 4
+        Next s
+        
+        ' Reset cap rates to original values
+        CommCapSheet.Range(Mapping("CommCapCell")).Value = CommCapRate
+        If Mapping.Exists("ResCapSheet") Then
+            ResCapSheet.Range(Mapping("ResCapCell")).Value = ResCapRate
+        End If
+        
+        Model.Close SaveChanges:=False
+        Set Model = Nothing
+
+NextIteration:
+    Next i
+    
+    ' --- 5. BULK WRITE LOG DATA ---
+    ' Write the entire results array to the worksheet in one operation
+    If LogRow > 0 Then
+        LogSheet.Range("A2").Resize(LogRow, UBound(LogData, 2)).Value = LogData
+    End If
+    
+    LogSheet.Columns.AutoFit
+    
+    ' --- NEW: Calculate and display total time ---
+    EndTime = Timer
+    TotalSeconds = Round(EndTime - StartTime, 0)
+    Dim FinalTime As String
+    FinalTime = Format(TotalSeconds / 86400, "hh:mm:ss")
+    
+    MsgBox "Analysis Complete!" & vbCrLf & vbCrLf & "Processed " & LogRow & " files." & vbCrLf & "Total Time: " & FinalTime, vbInformation
+    
+    GoTo CleanUp
+    
+ErrorHandler:
+    MsgBox "An error occurred: " & Err.Description, vbCritical, "Error"
+
+CleanUp:
+    ' --- 6. CLEANUP ---
+    If Not MainReport Is Nothing Then MainReport.Close SaveChanges:=False
+    App.Calculation = xlCalculationAutomatic
+    App.ScreenUpdating = True
+    App.DisplayAlerts = True
+    App.EnableEvents = True
+    Set App = Nothing
+    
+    Debug.Print "--- Analysis Finished at " & Now() & " ---"
+
+End Sub
+
+
+' --- HELPER FUNCTION: GET CELL MAPPING ---
+Function GetCellMapping(version As String) As Object
+    
+    Dim Map As Object
+    Set Map = CreateObject("Scripting.Dictionary")
+    
+    Select Case version
+        Case "Version 7c"
+            Map.Add "CommCapSheet", "Projected Returns"
+            Map.Add "CommCapCell", "G55"
+            Map.Add "CommCapLabel", "A55"
+            Map.Add "ResCapSheet", "Projected Returns"
+            Map.Add "ResCapCell", "G60"
+            Map.Add "ResCapLabel", "A60"
+            Map.Add "PartnerGainSheet", "Projected Returns"
+            Map.Add "PartnerGainCell", "E141"
+            Map.Add "PartnerGainLabel", "A141"
+            Map.Add "CompanyGainSheet", "TCC Returns"
+            Map.Add "CompanyGainCell", "F10"
+            Map.Add "CompanyGainLabel", "A10"
+            
+        Case "Version 8a", "Version 8b", "Version 8c", "Version 8f", "Version 8g", "Version 8d", "Version 9a", "Version 9c", "Version 9b", "Version 9d", "Version 9e", "Version 2021c", "Budget Builder 2021c", "Budget Builder 2021d", "Budget Builder 2022a", "Budget Builder 2022b", "Budget Builder 2022B"
+            Map.Add "CommCapSheet", "Projected Returns"
+            Map.Add "CommCapCell", "G53"
+            Map.Add "CommCapLabel", "A53"
+            Map.Add "ResCapSheet", "Projected Returns"
+            Map.Add "ResCapCell", "G58"
+            Map.Add "ResCapLabel", "A58"
+            Map.Add "PartnerGainSheet", "Projected Returns"
+            Map.Add "PartnerGainCell", "E139"
+            Map.Add "PartnerGainLabel", "A139"
+            Map.Add "CompanyGainSheet", "TCC Returns"
+            Map.Add "CompanyGainCell", "F10"
+            Map.Add "CompanyGainLabel", "A10"
+
+        Case "Budget Builder 2023A", "Budget Builder 2023a"
+            Map.Add "CommCapSheet", "Projected Returns"
+            Map.Add "CommCapCell", "F52"
+            Map.Add "CommCapLabel", "A52"
+            Map.Add "ResCapSheet", "Projected Returns"
+            Map.Add "ResCapCell", "F57"
+            Map.Add "ResCapLabel", "A57"
+            Map.Add "PartnerGainSheet", "Projected Returns"
+            Map.Add "PartnerGainCell", "E139"
+            Map.Add "PartnerGainLabel", "A139"
+            Map.Add "CompanyGainSheet", "TCC Returns"
+            Map.Add "CompanyGainCell", "D11"
+            Map.Add "CompanyGainLabel", "A11"
+
+        Case "Budget Builder 2024a", "Budget Builder 2024A", "Budget Builder 2025A", "Budget Builder 2025a", "Budget Builder 2025B"
+            Map.Add "CommCapSheet", "Projected Returns"
+            Map.Add "CommCapCell", "F52"
+            Map.Add "CommCapLabel", "A52"
+            Map.Add "ResCapSheet", "Projected Returns"
+            Map.Add "ResCapCell", "F57"
+            Map.Add "ResCapLabel", "A57"
+            Map.Add "PartnerGainSheet", "Projected Returns"
+            Map.Add "PartnerGainCell", "E142"
+            Map.Add "PartnerGainLabel", "A142"
+            Map.Add "CompanyGainSheet", "TCC Returns"
+            Map.Add "CompanyGainCell", "D11"
+            Map.Add "CompanyGainLabel", "A11"
+            
+        Case Else
+            Set GetCellMapping = Nothing
+            Exit Function
+            
+    End Select
+    
+    Set GetCellMapping = Map
+
+End Function
+
+' --- HELPER SUB: CREATE LOG HEADERS ---
+Sub CreateLogHeaders(ws As Worksheet)
+    Dim headers As Variant
+    headers = Array( _
+        "Deal Name", "File Name", "JVID", "Model Version", _
+        "Commercial Cap Rate Label", "Commercial Cap Rate", _
+        "Residential Cap Rate Label", "Residential Cap Rate", _
+        "-50 bps Partner Gain Label", "-50 bps Partner Gain", _
+        "-50 bps Company Gain Label", "-50 bps Company Gain", _
+        "-25 bps Partner Gain Label", "-25 bps Partner Gain", _
+        "-25 bps Company Gain Label", "-25 bps Company Gain", _
+        "+25 bps Partner Gain Label", "+25 bps Partner Gain", _
+        "+25 bps Company Gain Label", "+25 bps Company Gain", _
+        "+50 bps Partner Gain Label", "+50 bps Partner Gain", _
+        "+50 bps Company Gain Label", "+50 bps Company Gain" _
+    )
+    ws.Range("A1").Resize(1, UBound(headers) + 1).Value = headers
+    ws.Range("A1").EntireRow.Font.Bold = True
+End Sub
+
+
