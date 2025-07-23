@@ -1,0 +1,154 @@
+import pandas as pd
+import openpyxl
+import os
+import logging
+from datetime import datetime
+
+# --- CONFIGURATION ---
+# Updated paths as per your request.
+MAIN_REPORT_PATH = r"C:\Users\jsephus\OneDrive - CBRE, Inc\BB Data Extraction\Asset Reporting List_MASTER (7).xlsx"
+MODELS_FOLDER = r"C:\Users\jsephus\OneDrive - CBRE, Inc\BB Data Extraction\Original UW Files to process"
+LOGS_FOLDER = r"C:\Users\jsephus\OneDrive - CBRE, Inc\BB Data Extraction"
+
+# Path for the detailed text log file.
+TEXT_LOG_PATH = os.path.join(LOGS_FOLDER, 'update_log_{}.txt'.format(datetime.now().strftime('%Y%m%d_%H%M%S')))
+# Path for the new CSV comparison log file.
+COMPARISON_LOG_PATH = os.path.join(LOGS_FOLDER, 'comparison_log_{}.csv'.format(datetime.now().strftime('%Y%m%d_%H%M%S')))
+
+
+# --- SCRIPT SETTINGS (Customize if your report structure is different) ---
+DEAL_NAME_COLUMN = 'Deal Name'
+FORECAST_FILE_COLUMN = 'Forecast File Name'
+# New column for JV/DSA ID
+JV_ID_COLUMN = 'JV/DSA ID'
+HEADER_ROW_INDEX = 3
+TARGET_SHEET_NAME = 'Global Assumptions'
+TARGET_CELL = 'A7'
+
+
+def setup_logging():
+    """Configures logging to write to both a file and the console."""
+    log_dir = os.path.dirname(TEXT_LOG_PATH)
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(TEXT_LOG_PATH, mode='w'),
+            logging.StreamHandler()
+        ]
+    )
+
+def update_project_names():
+    """
+    Main function to read the report, iterate through forecast files,
+    update the project name, and create a detailed comparison log.
+    """
+    setup_logging()
+    logging.info("--- Starting Project Name Update Process ---")
+
+    # This list will store the data for our new comparison CSV log.
+    comparison_log_data = []
+
+    # --- 1. Read the Main Report ---
+    try:
+        logging.info(f"Reading main report from: {MAIN_REPORT_PATH}")
+        df_report = pd.read_excel(MAIN_REPORT_PATH, header=HEADER_ROW_INDEX)
+        logging.info(f"Successfully loaded report. Found {len(df_report)} total rows to process.")
+
+        # Validation to ensure all required columns exist.
+        required_cols = [DEAL_NAME_COLUMN, FORECAST_FILE_COLUMN, JV_ID_COLUMN]
+        if not all(col in df_report.columns for col in required_cols):
+            logging.error(f"Error: Report must contain the following columns: {required_cols}")
+            return
+
+    except FileNotFoundError:
+        logging.error(f"FATAL: Main report not found at '{MAIN_REPORT_PATH}'. Please check the path.")
+        return
+    except Exception as e:
+        logging.error(f"FATAL: An unexpected error occurred while reading the main report: {e}")
+        return
+
+    # --- 2. Iterate Through Each Deal and Update Files ---
+    updated_count = 0
+    skipped_count = 0
+    for index, row in df_report.iterrows():
+        deal_name = row.get(DEAL_NAME_COLUMN)
+        forecast_filename = row.get(FORECAST_FILE_COLUMN)
+        jv_id = row.get(JV_ID_COLUMN)
+
+        # Skip rows if essential data is missing.
+        if pd.isna(deal_name) or pd.isna(forecast_filename):
+            logging.warning(f"Row {index + HEADER_ROW_INDEX + 2}: Skipping due to missing Deal Name or Forecast File Name.")
+            skipped_count += 1
+            continue
+
+        forecast_filename = str(forecast_filename)
+        file_path = os.path.join(MODELS_FOLDER, forecast_filename)
+        logging.info(f"\nProcessing Deal: '{deal_name}' | File: '{forecast_filename}'")
+
+        if not os.path.exists(file_path):
+            logging.warning(f" --> File not found at '{file_path}'. Skipping.")
+            skipped_count += 1
+            continue
+
+        # --- 3. Open, Modify, and Log Changes for the Workbook ---
+        workbook = None
+        try:
+            workbook = openpyxl.load_workbook(file_path)
+
+            if TARGET_SHEET_NAME not in workbook.sheetnames:
+                logging.warning(f" --> Sheet '{TARGET_SHEET_NAME}' not found in '{forecast_filename}'. Skipping.")
+                skipped_count += 1
+                continue
+
+            sheet = workbook[TARGET_SHEET_NAME]
+            original_value = sheet[TARGET_CELL].value
+            
+            # Update the cell value.
+            sheet[TARGET_CELL] = deal_name
+            logging.info(f" --> Updated cell '{TARGET_CELL}' from '{original_value}' to '{deal_name}'.")
+
+            # Save the changes.
+            workbook.save(file_path)
+            logging.info(f" --> Successfully saved changes to '{forecast_filename}'.")
+            updated_count += 1
+
+            # Add a record to our comparison log data list.
+            comparison_log_data.append({
+                'JV_ID': jv_id,
+                'File Name': forecast_filename,
+                'Original Project Name': original_value,
+                'Updated Project Name': deal_name
+            })
+
+        except PermissionError:
+            logging.error(f" --> PERMISSION ERROR: Could not save '{forecast_filename}'. Is the file open in Excel?")
+            skipped_count += 1
+        except Exception as e:
+            logging.error(f" --> An unexpected error occurred while processing '{forecast_filename}': {e}")
+            skipped_count += 1
+        finally:
+            if workbook:
+                workbook.close()
+
+    # --- 4. Save the Comparison Log and Final Summary ---
+    if comparison_log_data:
+        try:
+            log_df = pd.DataFrame(comparison_log_data)
+            log_df.to_csv(COMPARISON_LOG_PATH, index=False)
+            logging.info(f"\nSuccessfully created comparison log: {COMPARISON_LOG_PATH}")
+        except Exception as e:
+            logging.error(f"Could not write the comparison log file. Error: {e}")
+
+    logging.info("\n--- Process Complete ---")
+    logging.info(f"Successfully updated: {updated_count} files.")
+    logging.info(f"Skipped: {skipped_count} files.")
+    logging.info(f"Text log saved to: {TEXT_LOG_PATH}")
+
+
+if __name__ == "__main__":
+    update_project_names()
+    print("\nScript finished. Check the log files for a detailed report.")
