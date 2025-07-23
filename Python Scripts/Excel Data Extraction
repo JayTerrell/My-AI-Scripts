@@ -1,0 +1,646 @@
+import os
+import pandas as pd
+import openpyxl
+from collections import OrderedDict
+from multiprocessing import Pool, cpu_count
+
+# --- Helper function to expand the compact mapping format ---
+def expand_mappings(compact_dict):
+    """
+    Expands a compact mapping into the two-line format (Label and Value)
+    that the rest of the script uses.
+    """
+    expanded_map = OrderedDict()
+    for key, info in compact_dict.items():
+        label_key = f"{key} Label"
+        expanded_map[label_key] = {"sheet": info["sheet"], "cell": info["cells"]["label"]}
+        expanded_map[key] = {"sheet": info["sheet"], "cell": info["cells"]["value"]}
+    return expanded_map
+
+# --- CONFIGURATION (New Compact Format) ---
+MODELS_DIRECTORY = "C:/Users/jsephus/OneDrive - CBRE, Inc/BB Data Extraction/New Projects to Process 7.17.25/Euro Projects"
+OUTPUT_FILE = "Updated_MK_&_Sheffield.csv"
+
+MODEL_VERSION_SHEET = "Instructions & Print"
+MODEL_VERSION_CELL = "G3"
+
+# Common fields in the new, efficient format
+COMMON_FIELDS_COMPACT = {
+    "Project Name": {"sheet": "Global Assumptions", "cells": {"value": "A7", "label": "A6"}},
+    "Total Rentable Area": {"sheet": "Total Project Costs", "cells": {"value": "C10", "label": "A10"}},
+    "Construction Start Date": {"sheet": "AMSOutput", "cells": {"value": "D2", "label": "D1"}},
+    "Shell Construction Complete Date": {"sheet": "AMSOutput", "cells": {"value": "E2", "label": "E1"}},
+    "Stabilization Date": {"sheet": "AMSOutput", "cells": {"value": "F2", "label": "F1"}},
+    "Sold/Earned Out Date": {"sheet": "AMSOutput", "cells": {"value": "G2", "label": "G1"}},
+}
+
+# Define cell locations for groups of model versions using the compact format
+VERSION_GROUPS_COMPACT = [
+    {
+        "versions": ["Version 7c"],
+        "mapping": {
+            "# of Units Market": {"sheet": "Residential Assumptions", "cells": {"value": "B71", "label": "A71"}},
+            "Resi - OpEx": {"sheet": "Projected Returns", "cells": {"value": "G32", "label": "A32"}},
+            "Comm - OpEx Leased": {"sheet": "Projected Returns", "cells": {"value": "G16", "label": "A16"}},
+            "Comm - OpEx Vacant": {"sheet": "Projected Returns", "cells": {"value": "G17", "label": "A17"}},
+            "Equity Partner 1": {"sheet": "Projected Returns", "cells": {"value": "C106", "label": "A106"}},
+            "Equity Partner 2": {"sheet": "Projected Returns", "cells": {"value": "C107", "label": "A106"}},
+            "Project IRR": {"sheet": "Projected Returns", "cells": {"value": "D140", "label": "A140"}},
+            "Project Profit $": {"sheet": "Projected Returns", "cells": {"value": "E140", "label": "A140"}},
+            "Project Primary Debt %": {"sheet": "Global Assumptions", "cells": {"value": "C26", "label": "A26"}},
+            "Project Mezzanine Debt %": {"sheet": "Global Assumptions", "cells": {"value": "C27", "label": "A27"}},
+            "TCC (Pre-Tax) Gross Gain": {"sheet": "TCC Returns", "cells": {"value": "F10", "label": "A10"}},
+            "TCC (Pre-Tax) Gross IRR": {"sheet": "TCC Returns", "cells": {"value": "I10", "label": "A10"}},
+            "TCC (Pre-Tax) Net Gain": {"sheet": "TCC Returns", "cells": {"value": "F11", "label": "A11"}},
+            "TCC (Pre-Tax) Net IRR": {"sheet": "TCC Returns", "cells": {"value": "I11", "label": "A11"}},
+            "TI CM Fees": {"sheet": "TCC Returns", "cells": {"value": "J26", "label": "A26"}},
+            "Dev Fees": {"sheet": "TCC Returns", "cells": {"value": "J25", "label": "A25"}},
+            "Partner 1 (Pre-Tax) Gain": {"sheet": "Projected Returns", "cells": {"value": "E141", "label": "A141"}},
+            "Partner 1 (Pre-Tax) IRR": {"sheet": "Projected Returns", "cells": {"value": "D141", "label": "A141"}},
+            "Partner 2 (Pre-Tax) Gain": {"sheet": "Projected Returns", "cells": {"value": "E142", "label": "A142"}},
+            "Partner 2 (Pre-Tax) IRR": {"sheet": "Projected Returns", "cells": {"value": "D142", "label": "A142"}},
+            "NOI to Breakeven (Carry Cost)": {"sheet": "Total Project Costs", "cells": {"value": "G242", "label": "C242"}},
+            "Total Budget": {"sheet": "Total Project Costs", "cells": {"value": "G334", "label": "A334"}},
+            "Total Land Costs": {"sheet": "Total Project Costs", "cells": {"value": "G309", "label": "A309"}},
+            "Total Hard Costs": {"sheet": "Total Project Costs", "cells": {"value": "G316", "label": "A316"}},
+            "Total Soft Costs": {"sheet": "Total Project Costs", "cells": {"value": "G325", "label": "A325"}},
+            "Total Interest Costs": {"sheet": "Total Project Costs", "cells": {"value": "G330", "label": "A330"}},
+            "Total Other Costs": {"sheet": "Total Project Costs", "cells": {"value": "G332", "label": "A332"}},
+            "Preferred Return": {"sheet": "Projected Returns", "cells": {"value": "E100", "label": "C100"}},
+            "Level 1 TCC Equity %": {"sheet": "Projected Returns", "cells": {"value": "F112", "label": "A112"}},
+            "Level 1 Until Partner IRR Equals": {"sheet": "Projected Returns", "cells": {"value": "E114", "label": "A112"}},
+            "Level 2 TCC Equity %": {"sheet": "Projected Returns", "cells": {"value": "F115", "label": "A115"}},
+            "Level 2 Until Partner IRR Equals": {"sheet": "Projected Returns", "cells": {"value": "E117", "label": "A115"}},
+            "Level 3 TCC Equity %": {"sheet": "Projected Returns", "cells": {"value": "F118", "label": "A118"}},
+            "CBRE LP (Pre-Tax) Gain": {"sheet": "TCC Returns", "cells": {"value": "Y314", "label": "A314"}},
+            "CBRE LP (Pre-Tax) IRR": {"sheet": "TCC Returns", "cells": {"value": "Y316", "label": "A316"}},
+            "TCC + CBRE (Pre-Tax) Net Gain": {"sheet": "TCC Returns", "cells": {"value": "AD314", "label": "A314"}},
+            "TCC + CBRE (Pre-Tax) Net IRR": {"sheet": "TCC Returns", "cells": {"value": "AD316", "label": "A316"}},
+            "TCC + CBRE (Pre-Tax) Gross Gain": {"sheet": "TCC Returns", "cells": {"value": "AC314", "label": "A314"}},
+            "TCC + CBRE (Pre-Tax) Gross IRR": {"sheet": "TCC Returns", "cells": {"value": "AC316", "label": "A316"}},
+        }
+    },
+    {
+        "versions": ["Version 8a", "Version 8b"],
+        "mapping": {
+            "# of Units Market": {"sheet": "Residential Assumptions", "cells": {"value": "B74", "label": "A74"}},
+            "# of Units Affordable": {"sheet": "Residential Assumptions", "cells": {"value": "B131", "label": "A131"}},
+            "Resi - OpEx": {"sheet": "Projected Returns", "cells": {"value": "G30", "label": "A30"}},
+            "Comm - OpEx Leased": {"sheet": "Projected Returns", "cells": {"value": "G16", "label": "A16"}},
+            "Comm - OpEx Vacant": {"sheet": "Projected Returns", "cells": {"value": "G17", "label": "A17"}},
+            "Equity Partner 1": {"sheet": "Projected Returns", "cells": {"value": "C104", "label": "A104"}},
+            "Equity Partner 2": {"sheet": "Projected Returns", "cells": {"value": "C105", "label": "A104"}},
+            "Project IRR": {"sheet": "Projected Returns", "cells": {"value": "D138", "label": "A138"}},
+            "Project Profit $": {"sheet": "Projected Returns", "cells": {"value": "E138", "label": "A138"}},
+            "Project Primary Debt %": {"sheet": "Global Assumptions", "cells": {"value": "C26", "label": "A26"}},
+            "Project Mezzanine Debt %": {"sheet": "Global Assumptions", "cells": {"value": "C27", "label": "A27"}},
+            "TCC (Pre-Tax) Gross Gain": {"sheet": "TCC Returns", "cells": {"value": "F10", "label": "A10"}},
+            "TCC (Pre-Tax) Gross IRR": {"sheet": "TCC Returns", "cells": {"value": "I10", "label": "A10"}},
+            "TCC (Pre-Tax) Net Gain": {"sheet": "TCC Returns", "cells": {"value": "F11", "label": "A11"}},
+            "TCC (Pre-Tax) Net IRR": {"sheet": "TCC Returns", "cells": {"value": "I11", "label": "A11"}},
+            "TI CM Fees": {"sheet": "TCC Returns", "cells": {"value": "J26", "label": "A26"}},
+            "Dev Fees": {"sheet": "TCC Returns", "cells": {"value": "J25", "label": "A25"}},
+            "Partner 1 (Pre-Tax) Gain": {"sheet": "Projected Returns", "cells": {"value": "E139", "label": "A139"}},
+            "Partner 1 (Pre-Tax) IRR": {"sheet": "Projected Returns", "cells": {"value": "D139", "label": "A139"}},
+            "Partner 2 (Pre-Tax) Gain": {"sheet": "Projected Returns", "cells": {"value": "E140", "label": "A140"}},
+            "Partner 2 (Pre-Tax) IRR": {"sheet": "Projected Returns", "cells": {"value": "D140", "label": "A140"}},
+            "NOI to Breakeven (Carry Cost)": {"sheet": "Total Project Costs", "cells": {"value": "G322", "label": "C322"}},
+            "Total Budget": {"sheet": "Total Project Costs", "cells": {"value": "G380", "label": "A380"}},
+            "Total Land Costs": {"sheet": "Total Project Costs", "cells": {"value": "G389", "label": "A389"}},
+            "Total Hard Costs": {"sheet": "Total Project Costs", "cells": {"value": "G396", "label": "A396"}},
+            "Total Soft Costs": {"sheet": "Total Project Costs", "cells": {"value": "G405", "label": "A405"}},
+            "Total Interest Costs": {"sheet": "Total Project Costs", "cells": {"value": "G410", "label": "A410"}},
+            "Total Other Costs": {"sheet": "Total Project Costs", "cells": {"value": "G412", "label": "A412"}},
+            "Preferred Return": {"sheet": "Projected Returns", "cells": {"value": "E98", "label": "C98"}},
+            "Level 1 TCC Equity %": {"sheet": "Projected Returns", "cells": {"value": "F110", "label": "A110"}},
+            "Level 1 Until Partner IRR Equals": {"sheet": "Projected Returns", "cells": {"value": "E112", "label": "A110"}},
+            "Level 2 TCC Equity %": {"sheet": "Projected Returns", "cells": {"value": "F113", "label": "A113"}},
+            "Level 2 Until Partner IRR Equals": {"sheet": "Projected Returns", "cells": {"value": "E115", "label": "A113"}},
+            "Level 3 TCC Equity %": {"sheet": "Projected Returns", "cells": {"value": "F116", "label": "A116"}},
+            "CBRE LP (Pre-Tax) Gain": {"sheet": "TCC Returns", "cells": {"value": "Y314", "label": "A314"}},
+            "CBRE LP (Pre-Tax) IRR": {"sheet": "TCC Returns", "cells": {"value": "Y316", "label": "A316"}},
+            "TCC + CBRE (Pre-Tax) Net Gain": {"sheet": "TCC Returns", "cells": {"value": "AD314", "label": "A314"}},
+            "TCC + CBRE (Pre-Tax) Net IRR": {"sheet": "TCC Returns", "cells": {"value": "AD316", "label": "A316"}},
+            "TCC + CBRE (Pre-Tax) Gross Gain": {"sheet": "TCC Returns", "cells": {"value": "AC314", "label": "A314"}},
+            "TCC + CBRE (Pre-Tax) Gross IRR": {"sheet": "TCC Returns", "cells": {"value": "AC316", "label": "A316"}},
+        }
+    },
+    {
+        "versions": ["Version 8c", "Version 8f", "Version 8g", "Version 8d"],
+        "mapping": {
+            "# of Units Market": {"sheet": "Residential Assumptions", "cells": {"value": "B74", "label": "A74"}},
+            "# of Units Affordable": {"sheet": "Residential Assumptions", "cells": {"value": "B131", "label": "A131"}},
+            "Resi - OpEx": {"sheet": "Projected Returns", "cells": {"value": "G30", "label": "A30"}},
+            "Comm - OpEx Leased": {"sheet": "Projected Returns", "cells": {"value": "G16", "label": "A16"}},
+            "Comm - OpEx Vacant": {"sheet": "Projected Returns", "cells": {"value": "G17", "label": "A17"}},
+            "Equity Partner 1": {"sheet": "Projected Returns", "cells": {"value": "C104", "label": "A104"}},
+            "Equity Partner 2": {"sheet": "Projected Returns", "cells": {"value": "C105", "label": "A104"}},
+            "Project IRR": {"sheet": "Projected Returns", "cells": {"value": "D138", "label": "A138"}},
+            "Project Profit $": {"sheet": "Projected Returns", "cells": {"value": "E138", "label": "A138"}},
+            "Project Primary Debt %": {"sheet": "Global Assumptions", "cells": {"value": "C26", "label": "A26"}},
+            "Project Mezzanine Debt %": {"sheet": "Global Assumptions", "cells": {"value": "C27", "label": "A27"}},
+            "TCC (Pre-Tax) Gross Gain": {"sheet": "TCC Returns", "cells": {"value": "F10", "label": "A10"}},
+            "TCC (Pre-Tax) Gross IRR": {"sheet": "TCC Returns", "cells": {"value": "I10", "label": "A10"}},
+            "TCC (Pre-Tax) Net Gain": {"sheet": "TCC Returns", "cells": {"value": "F11", "label": "A11"}},
+            "TCC (Pre-Tax) Net IRR": {"sheet": "TCC Returns", "cells": {"value": "I11", "label": "A11"}},
+            "TI CM Fees": {"sheet": "TCC Returns", "cells": {"value": "L26", "label": "A26"}},
+            "Dev Fees": {"sheet": "TCC Returns", "cells": {"value": "L25", "label": "A25"}},
+            "Partner 1 (Pre-Tax) Gain": {"sheet": "Projected Returns", "cells": {"value": "E139", "label": "A139"}},
+            "Partner 1 (Pre-Tax) IRR": {"sheet": "Projected Returns", "cells": {"value": "D139", "label": "A139"}},
+            "Partner 2 (Pre-Tax) Gain": {"sheet": "Projected Returns", "cells": {"value": "E140", "label": "A140"}},
+            "Partner 2 (Pre-Tax) IRR": {"sheet": "Projected Returns", "cells": {"value": "D140", "label": "A140"}},
+            "NOI to Breakeven (Carry Cost)": {"sheet": "Total Project Costs", "cells": {"value": "G339", "label": "C339"}},
+            "Total Budget": {"sheet": "Total Project Costs", "cells": {"value": "G397", "label": "A397"}},
+            "Total Land Costs": {"sheet": "Total Project Costs", "cells": {"value": "G406", "label": "A406"}},
+            "Total Hard Costs": {"sheet": "Total Project Costs", "cells": {"value": "G413", "label": "A413"}},
+            "Total Soft Costs": {"sheet": "Total Project Costs", "cells": {"value": "G422", "label": "A422"}},
+            "Total Interest Costs": {"sheet": "Total Project Costs", "cells": {"value": "G427", "label": "A427"}},
+            "Total Other Costs": {"sheet": "Total Project Costs", "cells": {"value": "G429", "label": "A429"}},
+            "Preferred Return": {"sheet": "Projected Returns", "cells": {"value": "E98", "label": "C98"}},
+            "Level 1 TCC Equity %": {"sheet": "Projected Returns", "cells": {"value": "F110", "label": "A110"}},
+            "Level 1 Until Partner IRR Equals": {"sheet": "Projected Returns", "cells": {"value": "E112", "label": "A110"}},
+            "Level 2 TCC Equity %": {"sheet": "Projected Returns", "cells": {"value": "F113", "label": "A113"}},
+            "Level 2 Until Partner IRR Equals": {"sheet": "Projected Returns", "cells": {"value": "E115", "label": "A113"}},
+            "Level 3 TCC Equity %": {"sheet": "Projected Returns", "cells": {"value": "F116", "label": "A116"}},
+            "CBRE LP (Pre-Tax) Gain": {"sheet": "TCC Returns", "cells": {"value": "Y314", "label": "A314"}},
+            "CBRE LP (Pre-Tax) IRR": {"sheet": "TCC Returns", "cells": {"value": "Y316", "label": "A316"}},
+            "TCC + CBRE (Pre-Tax) Net Gain": {"sheet": "TCC Returns", "cells": {"value": "AD314", "label": "A314"}},
+            "TCC + CBRE (Pre-Tax) Net IRR": {"sheet": "TCC Returns", "cells": {"value": "AD316", "label": "A316"}},
+            "TCC + CBRE (Pre-Tax) Gross Gain": {"sheet": "TCC Returns", "cells": {"value": "AC314", "label": "A314"}},
+            "TCC + CBRE (Pre-Tax) Gross IRR": {"sheet": "TCC Returns", "cells": {"value": "AC316", "label": "A316"}},
+        }
+    },
+    {
+        "versions": ["Version 9a", "Version 9c", "Version 9b"],
+        "mapping": {
+            "# of Units Market": {"sheet": "Residential Assumptions", "cells": {"value": "B74", "label": "A74"}},
+            "# of Units Affordable": {"sheet": "Residential Assumptions", "cells": {"value": "B131", "label": "A131"}},
+            "Resi - OpEx": {"sheet": "Projected Returns", "cells": {"value": "G30", "label": "A30"}},
+            "Comm - OpEx Leased": {"sheet": "Projected Returns", "cells": {"value": "G16", "label": "A16"}},
+            "Comm - OpEx Vacant": {"sheet": "Projected Returns", "cells": {"value": "G17", "label": "A17"}},
+            "Equity Partner 1": {"sheet": "Projected Returns", "cells": {"value": "C104", "label": "A104"}},
+            "Equity Partner 2": {"sheet": "Projected Returns", "cells": {"value": "C105", "label": "A104"}},
+            "Project IRR": {"sheet": "Projected Returns", "cells": {"value": "D138", "label": "A138"}},
+            "Project Profit $": {"sheet": "Projected Returns", "cells": {"value": "E138", "label": "A138"}},
+            "Project Primary Debt %": {"sheet": "Global Assumptions", "cells": {"value": "C26", "label": "A26"}},
+            "Project Mezzanine Debt %": {"sheet": "Global Assumptions", "cells": {"value": "C27", "label": "A27"}},
+            "TCC (Pre-Tax) Gross Gain": {"sheet": "TCC Returns", "cells": {"value": "F10", "label": "A10"}},
+            "TCC (Pre-Tax) Gross IRR": {"sheet": "TCC Returns", "cells": {"value": "I10", "label": "A10"}},
+            "TCC (Pre-Tax) Net Gain": {"sheet": "TCC Returns", "cells": {"value": "F11", "label": "A11"}},
+            "TCC (Pre-Tax) Net IRR": {"sheet": "TCC Returns", "cells": {"value": "I11", "label": "A11"}},
+            "TI CM Fees": {"sheet": "TCC Returns", "cells": {"value": "L26", "label": "A26"}},
+            "Dev Fees": {"sheet": "TCC Returns", "cells": {"value": "L25", "label": "A25"}},
+            "Partner 1 (Pre-Tax) Gain": {"sheet": "Projected Returns", "cells": {"value": "E139", "label": "A139"}},
+            "Partner 1 (Pre-Tax) IRR": {"sheet": "Projected Returns", "cells": {"value": "D139", "label": "A139"}},
+            "Partner 2 (Pre-Tax) Gain": {"sheet": "Projected Returns", "cells": {"value": "E140", "label": "A140"}},
+            "Partner 2 (Pre-Tax) IRR": {"sheet": "Projected Returns", "cells": {"value": "D140", "label": "A140"}},
+            "NOI to Breakeven (Carry Cost)": {"sheet": "Total Project Costs", "cells": {"value": "G339", "label": "C339"}},
+            "Total Budget": {"sheet": "Total Project Costs", "cells": {"value": "G397", "label": "A397"}},
+            "Total Land Costs": {"sheet": "Total Project Costs", "cells": {"value": "G406", "label": "A406"}},
+            "Total Hard Costs": {"sheet": "Total Project Costs", "cells": {"value": "G413", "label": "A413"}},
+            "Total Soft Costs": {"sheet": "Total Project Costs", "cells": {"value": "G422", "label": "A422"}},
+            "Total Interest Costs": {"sheet": "Total Project Costs", "cells": {"value": "G427", "label": "A427"}},
+            "Total Other Costs": {"sheet": "Total Project Costs", "cells": {"value": "G429", "label": "A429"}},
+            "Preferred Return": {"sheet": "Projected Returns", "cells": {"value": "E98", "label": "C98"}},
+            "Level 1 TCC Equity %": {"sheet": "Projected Returns", "cells": {"value": "F110", "label": "A110"}},
+            "Level 1 Until Partner IRR Equals": {"sheet": "Projected Returns", "cells": {"value": "E112", "label": "A110"}},
+            "Level 2 TCC Equity %": {"sheet": "Projected Returns", "cells": {"value": "F113", "label": "A113"}},
+            "Level 2 Until Partner IRR Equals": {"sheet": "Projected Returns", "cells": {"value": "E115", "label": "A113"}},
+            "Level 3 TCC Equity %": {"sheet": "Projected Returns", "cells": {"value": "F116", "label": "A116"}},
+            "CBRE LP (Pre-Tax) Gain": {"sheet": "TCC Returns", "cells": {"value": "Y314", "label": "A314"}},
+            "CBRE LP (Pre-Tax) IRR": {"sheet": "TCC Returns", "cells": {"value": "Y316", "label": "A316"}},
+            "TCC + CBRE (Pre-Tax) Net Gain": {"sheet": "TCC Returns", "cells": {"value": "AD314", "label": "A314"}},
+            "TCC + CBRE (Pre-Tax) Net IRR": {"sheet": "TCC Returns", "cells": {"value": "AD316", "label": "A316"}},
+            "TCC + CBRE (Pre-Tax) Gross Gain": {"sheet": "TCC Returns", "cells": {"value": "AC314", "label": "A314"}},
+            "TCC + CBRE (Pre-Tax) Gross IRR": {"sheet": "TCC Returns", "cells": {"value": "AC316", "label": "A316"}},
+        }
+    },
+    {
+        "versions": ["Version 9d", "Version 9e"],
+        "mapping": {
+            "# of Units Market": {"sheet": "Residential Assumptions", "cells": {"value": "B74", "label": "A74"}},
+            "# of Units Affordable": {"sheet": "Residential Assumptions", "cells": {"value": "B131", "label": "A131"}},
+            "Resi - OpEx": {"sheet": "Projected Returns", "cells": {"value": "G30", "label": "A30"}},
+            "Comm - OpEx Leased": {"sheet": "Projected Returns", "cells": {"value": "G16", "label": "A16"}},
+            "Comm - OpEx Vacant": {"sheet": "Projected Returns", "cells": {"value": "G17", "label": "A17"}},
+            "Equity Partner 1": {"sheet": "Projected Returns", "cells": {"value": "C104", "label": "A104"}},
+            "Equity Partner 2": {"sheet": "Projected Returns", "cells": {"value": "C105", "label": "A104"}},
+            "Project IRR": {"sheet": "Projected Returns", "cells": {"value": "D138", "label": "A138"}},
+            "Project Profit $": {"sheet": "Projected Returns", "cells": {"value": "E138", "label": "A138"}},
+            "Project Primary Debt %": {"sheet": "Global Assumptions", "cells": {"value": "C26", "label": "A26"}},
+            "Project Mezzanine Debt %": {"sheet": "Global Assumptions", "cells": {"value": "C27", "label": "A27"}},
+            "TCC (Pre-Tax) Gross Gain": {"sheet": "TCC Returns", "cells": {"value": "F10", "label": "A10"}},
+            "TCC (Pre-Tax) Gross IRR": {"sheet": "TCC Returns", "cells": {"value": "I10", "label": "A10"}},
+            "TCC (Pre-Tax) Net Gain": {"sheet": "TCC Returns", "cells": {"value": "F11", "label": "A11"}},
+            "TCC (Pre-Tax) Net IRR": {"sheet": "TCC Returns", "cells": {"value": "I11", "label": "A11"}},
+            "TI CM Fees": {"sheet": "TCC Returns", "cells": {"value": "L26", "label": "A26"}},
+            "Dev Fees": {"sheet": "TCC Returns", "cells": {"value": "L25", "label": "A25"}},
+            "Partner 1 (Pre-Tax) Gain": {"sheet": "Projected Returns", "cells": {"value": "E139", "label": "A139"}},
+            "Partner 1 (Pre-Tax) IRR": {"sheet": "Projected Returns", "cells": {"value": "D139", "label": "A139"}},
+            "Partner 2 (Pre-Tax) Gain": {"sheet": "Projected Returns", "cells": {"value": "E140", "label": "A140"}},
+            "Partner 2 (Pre-Tax) IRR": {"sheet": "Projected Returns", "cells": {"value": "D140", "label": "A140"}},
+            "NOI to Breakeven (Carry Cost)": {"sheet": "Total Project Costs", "cells": {"value": "G419", "label": "C419"}},
+            "Total Budget": {"sheet": "Total Project Costs", "cells": {"value": "G511", "label": "A511"}},
+            "Total Land Costs": {"sheet": "Total Project Costs", "cells": {"value": "G486", "label": "A486"}},
+            "Total Hard Costs": {"sheet": "Total Project Costs", "cells": {"value": "G493", "label": "A493"}},
+            "Total Soft Costs": {"sheet": "Total Project Costs", "cells": {"value": "G502", "label": "A502"}},
+            "Total Interest Costs": {"sheet": "Total Project Costs", "cells": {"value": "G507", "label": "A507"}},
+            "Total Other Costs": {"sheet": "Total Project Costs", "cells": {"value": "G509", "label": "A509"}},
+            "Preferred Return": {"sheet": "Projected Returns", "cells": {"value": "E98", "label": "C98"}},
+            "Level 1 TCC Equity %": {"sheet": "Projected Returns", "cells": {"value": "F110", "label": "A110"}},
+            "Level 1 Until Partner IRR Equals": {"sheet": "Projected Returns", "cells": {"value": "E112", "label": "A110"}},
+            "Level 2 TCC Equity %": {"sheet": "Projected Returns", "cells": {"value": "F113", "label": "A113"}},
+            "Level 2 Until Partner IRR Equals": {"sheet": "Projected Returns", "cells": {"value": "E115", "label": "A113"}},
+            "Level 3 TCC Equity %": {"sheet": "Projected Returns", "cells": {"value": "F116", "label": "A116"}},
+            "CBRE LP (Pre-Tax) Gain": {"sheet": "TCC Returns", "cells": {"value": "Y314", "label": "A314"}},
+            "CBRE LP (Pre-Tax) IRR": {"sheet": "TCC Returns", "cells": {"value": "Y316", "label": "A316"}},
+            "TCC + CBRE (Pre-Tax) Net Gain": {"sheet": "TCC Returns", "cells": {"value": "AD314", "label": "A314"}},
+            "TCC + CBRE (Pre-Tax) Net IRR": {"sheet": "TCC Returns", "cells": {"value": "AD316", "label": "A316"}},
+            "TCC + CBRE (Pre-Tax) Gross Gain": {"sheet": "TCC Returns", "cells": {"value": "AC314", "label": "A314"}},
+            "TCC + CBRE (Pre-Tax) Gross IRR": {"sheet": "TCC Returns", "cells": {"value": "AC316", "label": "A316"}},
+        }
+    },
+    {
+        "versions": ["Version 2021c"],
+        "mapping": {
+            "# of Units Market": {"sheet": "Residential Assumptions", "cells": {"value": "B74", "label": "A74"}},
+            "# of Units Affordable": {"sheet": "Residential Assumptions", "cells": {"value": "B131", "label": "A131"}},
+            "Resi - OpEx": {"sheet": "Projected Returns", "cells": {"value": "G30", "label": "A30"}},
+            "Comm - OpEx Leased": {"sheet": "Projected Returns", "cells": {"value": "G16", "label": "A16"}},
+            "Comm - OpEx Vacant": {"sheet": "Projected Returns", "cells": {"value": "G17", "label": "A17"}},
+            "Equity Partner 1": {"sheet": "Projected Returns", "cells": {"value": "C104", "label": "A104"}},
+            "Equity Partner 2": {"sheet": "Projected Returns", "cells": {"value": "C105", "label": "A104"}},
+            "Project IRR": {"sheet": "Projected Returns", "cells": {"value": "D138", "label": "A138"}},
+            "Project Profit $": {"sheet": "Projected Returns", "cells": {"value": "E138", "label": "A138"}},
+            "Project Primary Debt %": {"sheet": "Global Assumptions", "cells": {"value": "C26", "label": "A26"}},
+            "Project Mezzanine Debt %": {"sheet": "Global Assumptions", "cells": {"value": "C27", "label": "A27"}},
+            "TCC (Pre-Tax) Gross Gain": {"sheet": "TCC Returns", "cells": {"value": "F10", "label": "A10"}},
+            "TCC (Pre-Tax) Gross IRR": {"sheet": "TCC Returns", "cells": {"value": "I10", "label": "A10"}},
+            "TCC (Pre-Tax) Net Gain": {"sheet": "TCC Returns", "cells": {"value": "F11", "label": "A11"}},
+            "TCC (Pre-Tax) Net IRR": {"sheet": "TCC Returns", "cells": {"value": "I11", "label": "A11"}},
+            "TCC + CBRE (Pre-Tax) Net Gain": {"sheet": "TCC Returns", "cells": {"value": "AD371", "label": "A371"}},
+            "TCC + CBRE (Pre-Tax) Net IRR": {"sheet": "TCC Returns", "cells": {"value": "AD373", "label": "A373"}},
+            "CBRE LP (Pre-Tax) Gain": {"sheet": "TCC Returns", "cells": {"value": "Y371", "label": "A371"}},
+            "CBRE LP (Pre-Tax) IRR": {"sheet": "TCC Returns", "cells": {"value": "Y373", "label": "A373"}},
+            "TCC + CBRE (Pre-Tax) Gross Gain": {"sheet": "TCC Returns", "cells": {"value": "AC371", "label": "A371"}},
+            "TCC + CBRE (Pre-Tax) Gross IRR": {"sheet": "TCC Returns", "cells": {"value": "AC373", "label": "A373"}},
+            "TI CM Fees": {"sheet": "TCC Returns", "cells": {"value": "L26", "label": "A26"}},
+            "Dev Fees": {"sheet": "TCC Returns", "cells": {"value": "L25", "label": "A25"}},
+            "TCC Debt Financing Fee": {"sheet": "TCC Returns", "cells": {"value": "L27", "label": "A27"}},
+            "Partner 1 (Pre-Tax) Gain": {"sheet": "Projected Returns", "cells": {"value": "E139", "label": "A139"}},
+            "Partner 1 (Pre-Tax) IRR": {"sheet": "Projected Returns", "cells": {"value": "D139", "label": "A139"}},
+            "Partner 2 (Pre-Tax) Gain": {"sheet": "Projected Returns", "cells": {"value": "E140", "label": "A140"}},
+            "Partner 2 (Pre-Tax) IRR": {"sheet": "Projected Returns", "cells": {"value": "D140", "label": "A140"}},
+            "NOI to Breakeven (Carry Cost)": {"sheet": "Total Project Costs", "cells": {"value": "G420", "label": "C420"}},
+            "Total Budget": {"sheet": "Total Project Costs", "cells": {"value": "G478", "label": "A478"}},
+            "Total Land Costs": {"sheet": "Total Project Costs", "cells": {"value": "G487", "label": "A487"}},
+            "Total Hard Costs": {"sheet": "Total Project Costs", "cells": {"value": "G494", "label": "A494"}},
+            "Total Soft Costs": {"sheet": "Total Project Costs", "cells": {"value": "G503", "label": "A503"}},
+            "Total Interest Costs": {"sheet": "Total Project Costs", "cells": {"value": "G508", "label": "A508"}},
+            "Total Other Costs": {"sheet": "Total Project Costs", "cells": {"value": "G510", "label": "A510"}},
+            "Preferred Return": {"sheet": "Projected Returns", "cells": {"value": "E98", "label": "C98"}},
+            "Level 1 TCC Equity %": {"sheet": "Projected Returns", "cells": {"value": "F110", "label": "A110"}},
+            "Level 1 Until Partner IRR Equals": {"sheet": "Projected Returns", "cells": {"value": "E112", "label": "A110"}},
+            "Level 2 TCC Equity %": {"sheet": "Projected Returns", "cells": {"value": "F113", "label": "A113"}},
+            "Level 2 Until Partner IRR Equals": {"sheet": "Projected Returns", "cells": {"value": "E115", "label": "A113"}},
+            "Level 3 TCC Equity %": {"sheet": "Projected Returns", "cells": {"value": "F116", "label": "A116"}},
+        }
+    },
+    {
+        "versions": ["Budget Builder 2021c", "Budget Builder 2021d", "Budget Builder 2022a", "Budget Builder 2022b", "Budget Builder 2022B"],
+        "mapping": {
+            "# of Units Market": {"sheet": "Residential Assumptions", "cells": {"value": "B74", "label": "A74"}},
+            "# of Units Affordable": {"sheet": "Residential Assumptions", "cells": {"value": "B131", "label": "A131"}},
+            "Resi - OpEx": {"sheet": "Projected Returns", "cells": {"value": "G30", "label": "A30"}},
+            "Comm - OpEx Leased": {"sheet": "Projected Returns", "cells": {"value": "G16", "label": "A16"}},
+            "Comm - OpEx Vacant": {"sheet": "Projected Returns", "cells": {"value": "G17", "label": "A17"}},
+            "Equity Partner 1": {"sheet": "Projected Returns", "cells": {"value": "C104", "label": "A104"}},
+            "Equity Partner 2": {"sheet": "Projected Returns", "cells": {"value": "C105", "label": "A104"}},
+            "Project IRR": {"sheet": "Projected Returns", "cells": {"value": "D138", "label": "A138"}},
+            "Project Profit $": {"sheet": "Projected Returns", "cells": {"value": "E138", "label": "A138"}},
+            "Project Primary Debt %": {"sheet": "Global Assumptions", "cells": {"value": "C26", "label": "A26"}},
+            "Project Mezzanine Debt %": {"sheet": "Global Assumptions", "cells": {"value": "C27", "label": "A27"}},
+            "TCC (Pre-Tax) Gross Gain": {"sheet": "TCC Returns", "cells": {"value": "F10", "label": "A10"}},
+            "TCC (Pre-Tax) Gross IRR": {"sheet": "TCC Returns", "cells": {"value": "I10", "label": "A10"}},
+            "TCC (Pre-Tax) Net Gain": {"sheet": "TCC Returns", "cells": {"value": "F11", "label": "A11"}},
+            "TCC (Pre-Tax) Net IRR": {"sheet": "TCC Returns", "cells": {"value": "I11", "label": "A11"}},
+            "TCC + CBRE (Pre-Tax) Net Gain": {"sheet": "TCC Returns", "cells": {"value": "AD371", "label": "A371"}},
+            "TCC + CBRE (Pre-Tax) Net IRR": {"sheet": "TCC Returns", "cells": {"value": "AD373", "label": "A373"}},
+            "CBRE LP (Pre-Tax) Gain": {"sheet": "TCC Returns", "cells": {"value": "Y371", "label": "A371"}},
+            "CBRE LP (Pre-Tax) IRR": {"sheet": "TCC Returns", "cells": {"value": "Y373", "label": "A373"}},
+            "TCC + CBRE (Pre-Tax) Gross Gain": {"sheet": "TCC Returns", "cells": {"value": "AC371", "label": "A371"}},
+            "TCC + CBRE (Pre-Tax) Gross IRR": {"sheet": "TCC Returns", "cells": {"value": "AC373", "label": "A373"}},
+            "TI CM Fees": {"sheet": "TCC Returns", "cells": {"value": "L26", "label": "A26"}},
+            "Dev Fees": {"sheet": "TCC Returns", "cells": {"value": "L25", "label": "A25"}},
+            "TCC Debt Financing Fee": {"sheet": "TCC Returns", "cells": {"value": "L27", "label": "A27"}},
+            "Partner 1 (Pre-Tax) Gain": {"sheet": "Projected Returns", "cells": {"value": "E139", "label": "A139"}},
+            "Partner 1 (Pre-Tax) IRR": {"sheet": "Projected Returns", "cells": {"value": "D139", "label": "A139"}},
+            "Partner 2 (Pre-Tax) Gain": {"sheet": "Projected Returns", "cells": {"value": "E140", "label": "A140"}},
+            "Partner 2 (Pre-Tax) IRR": {"sheet": "Projected Returns", "cells": {"value": "D140", "label": "A140"}},
+            "NOI to Breakeven (Carry Cost)": {"sheet": "Total Project Costs", "cells": {"value": "G420", "label": "C420"}},
+            "Total Budget": {"sheet": "Total Project Costs", "cells": {"value": "G512", "label": "A512"}},
+            "Total Land Costs": {"sheet": "Total Project Costs", "cells": {"value": "G487", "label": "A487"}},
+            "Total Hard Costs": {"sheet": "Total Project Costs", "cells": {"value": "G494", "label": "A494"}},
+            "Total Soft Costs": {"sheet": "Total Project Costs", "cells": {"value": "G503", "label": "A503"}},
+            "Total Interest Costs": {"sheet": "Total Project Costs", "cells": {"value": "G508", "label": "A508"}},
+            "Total Other Costs": {"sheet": "Total Project Costs", "cells": {"value": "G510", "label": "A510"}},
+            "Preferred Return": {"sheet": "Projected Returns", "cells": {"value": "E98", "label": "C98"}},
+            "Level 1 TCC Equity %": {"sheet": "Projected Returns", "cells": {"value": "F110", "label": "A110"}},
+            "Level 1 Until Partner IRR Equals": {"sheet": "Projected Returns", "cells": {"value": "E112", "label": "A110"}},
+            "Level 2 TCC Equity %": {"sheet": "Projected Returns", "cells": {"value": "F113", "label": "A113"}},
+            "Level 2 Until Partner IRR Equals": {"sheet": "Projected Returns", "cells": {"value": "E115", "label": "A113"}},
+            "Level 3 TCC Equity %": {"sheet": "Projected Returns", "cells": {"value": "F116", "label": "A116"}},
+        }
+    },
+    {
+        "versions": ["Budget Builder 2023A", "Budget Builder 2023a"],
+        "mapping": {
+            "# of Units Market": {"sheet": "Residential Assumptions", "cells": {"value": "B74", "label": "A74"}},
+            "# of Units Affordable": {"sheet": "Residential Assumptions", "cells": {"value": "B131", "label": "A131"}},
+            "Resi - OpEx": {"sheet": "Projected Returns", "cells": {"value": "G29", "label": "A29"}},
+            "Comm - OpEx Leased": {"sheet": "Projected Returns", "cells": {"value": "G15", "label": "A15"}},
+            "Comm - OpEx Vacant": {"sheet": "Projected Returns", "cells": {"value": "G16", "label": "A16"}},
+            "Equity Partner 1": {"sheet": "Projected Returns", "cells": {"value": "C104", "label": "A104"}},
+            "Equity Partner 2": {"sheet": "Projected Returns", "cells": {"value": "C105", "label": "A104"}},
+            "Project IRR": {"sheet": "Projected Returns", "cells": {"value": "D138", "label": "A138"}},
+            "Project Profit $": {"sheet": "Projected Returns", "cells": {"value": "E138", "label": "A138"}},
+            "Project Primary Debt %": {"sheet": "Global Assumptions", "cells": {"value": "C26", "label": "A26"}},
+            "Project Mezzanine Debt %": {"sheet": "Global Assumptions", "cells": {"value": "C27", "label": "A27"}},
+            "TCC (Pre-Tax) Gross Gain": {"sheet": "TCC Returns", "cells": {"value": "D11", "label": "A11"}},
+            "TCC (Pre-Tax) Gross IRR": {"sheet": "TCC Returns", "cells": {"value": "I11", "label": "A11"}},
+            "CBRE LP (Pre-Tax) Gain": {"sheet": "TCC Returns", "cells": {"value": "Y372", "label": "A372"}},
+            "CBRE LP (Pre-Tax) IRR": {"sheet": "TCC Returns", "cells": {"value": "Y374", "label": "A374"}},
+            "TCC (Pre-Tax) Net Gain": {"sheet": "TCC Returns", "cells": {"value": "D12", "label": "A12"}},
+            "TCC (Pre-Tax) Net IRR": {"sheet": "TCC Returns", "cells": {"value": "I12", "label": "A12"}},
+            "TCC + CBRE (Pre-Tax) Net Gain": {"sheet": "TCC Returns", "cells": {"value": "AD372", "label": "A372"}},
+            "TCC + CBRE (Pre-Tax) Net IRR": {"sheet": "TCC Returns", "cells": {"value": "AD374", "label": "A374"}},
+            "TCC + CBRE (Pre-Tax) Gross Gain": {"sheet": "TCC Returns", "cells": {"value": "AC372", "label": "A372"}},
+            "TCC + CBRE (Pre-Tax) Gross IRR": {"sheet": "TCC Returns", "cells": {"value": "AC374", "label": "A374"}},
+            "TI CM Fees": {"sheet": "TCC Returns", "cells": {"value": "L27", "label": "A27"}},
+            "Dev Fees": {"sheet": "TCC Returns", "cells": {"value": "L26", "label": "A26"}},
+            "TCC Debt Financing Fee": {"sheet": "TCC Returns", "cells": {"value": "L28", "label": "A28"}},
+            "Partner 1 (Pre-Tax) Gain": {"sheet": "Projected Returns", "cells": {"value": "E139", "label": "A139"}},
+            "Partner 1 (Pre-Tax) IRR": {"sheet": "Projected Returns", "cells": {"value": "D139", "label": "A139"}},
+            "Partner 2 (Pre-Tax) Gain": {"sheet": "Projected Returns", "cells": {"value": "E140", "label": "A140"}},
+            "Partner 2 (Pre-Tax) IRR": {"sheet": "Projected Returns", "cells": {"value": "D140", "label": "A140"}},
+            "NOI to Breakeven (Carry Cost)": {"sheet": "Total Project Costs", "cells": {"value": "G420", "label": "C420"}},
+            "Total Budget": {"sheet": "Total Project Costs", "cells": {"value": "G512", "label": "A512"}},
+            "Total Land Costs": {"sheet": "Total Project Costs", "cells": {"value": "G487", "label": "A487"}},
+            "Total Hard Costs": {"sheet": "Total Project Costs", "cells": {"value": "G494", "label": "A494"}},
+            "Total Soft Costs": {"sheet": "Total Project Costs", "cells": {"value": "G503", "label": "A503"}},
+            "Total Interest Costs": {"sheet": "Total Project Costs", "cells": {"value": "G508", "label": "A508"}},
+            "Total Other Costs": {"sheet": "Total Project Costs", "cells": {"value": "G510", "label": "A510"}},
+            "Preferred Return": {"sheet": "Projected Returns", "cells": {"value": "E98", "label": "C98"}},
+            "Level 1 TCC Equity %": {"sheet": "Projected Returns", "cells": {"value": "F110", "label": "A110"}},
+            "Level 1 Until Partner IRR Equals": {"sheet": "Projected Returns", "cells": {"value": "E112", "label": "A110"}},
+            "Level 2 TCC Equity %": {"sheet": "Projected Returns", "cells": {"value": "F113", "label": "A113"}},
+            "Level 2 Until Partner IRR Equals": {"sheet": "Projected Returns", "cells": {"value": "E115", "label": "A113"}},
+            "Level 3 TCC Equity %": {"sheet": "Projected Returns", "cells": {"value": "F116", "label": "A116"}},
+        }
+    },
+    {
+        "versions": ["Budget Builder 2024a", "Budget Builder 2024A"],
+        "mapping": {
+            "# of Units Market": {"sheet": "Residential Assumptions", "cells": {"value": "B74", "label": "A74"}},
+            "# of Units Affordable": {"sheet": "Residential Assumptions", "cells": {"value": "B131", "label": "A131"}},
+            "Resi - OpEx": {"sheet": "Projected Returns", "cells": {"value": "G29", "label": "A29"}},
+            "Comm - OpEx Leased": {"sheet": "Projected Returns", "cells": {"value": "G15", "label": "A15"}},
+            "Comm - OpEx Vacant": {"sheet": "Projected Returns", "cells": {"value": "G16", "label": "A16"}},
+            "Equity Partner 1": {"sheet": "Projected Returns", "cells": {"value": "C104", "label": "A104"}},
+            "Equity Partner 2": {"sheet": "Projected Returns", "cells": {"value": "C105", "label": "A104"}},
+            "Project IRR": {"sheet": "Projected Returns", "cells": {"value": "D141", "label": "A141"}},
+            "Project Profit $": {"sheet": "Projected Returns", "cells": {"value": "E141", "label": "A141"}},
+            "Project Primary Debt %": {"sheet": "Global Assumptions", "cells": {"value": "C26", "label": "A26"}},
+            "Project Mezzanine Debt %": {"sheet": "Global Assumptions", "cells": {"value": "C27", "label": "A27"}},
+            "TCC (Pre-Tax) Gross Gain": {"sheet": "TCC Returns", "cells": {"value": "D11", "label": "A11"}},
+            "TCC (Pre-Tax) Gross IRR": {"sheet": "TCC Returns", "cells": {"value": "I11", "label": "A11"}},
+            "CBRE LP (Pre-Tax) Gain": {"sheet": "TCC Returns", "cells": {"value": "Y372", "label": "A372"}},
+            "CBRE LP (Pre-Tax) IRR": {"sheet": "TCC Returns", "cells": {"value": "Y374", "label": "A374"}},
+            "TCC (Pre-Tax) Net Gain": {"sheet": "TCC Returns", "cells": {"value": "D12", "label": "A12"}},
+            "TCC (Pre-Tax) Net IRR": {"sheet": "TCC Returns", "cells": {"value": "I12", "label": "A12"}},
+            "TCC + CBRE (Pre-Tax) Net Gain": {"sheet": "TCC Returns", "cells": {"value": "AD372", "label": "A372"}},
+            "TCC + CBRE (Pre-Tax) Net IRR": {"sheet": "TCC Returns", "cells": {"value": "AD374", "label": "A374"}},
+            "TCC + CBRE (Pre-Tax) Gross Gain": {"sheet": "TCC Returns", "cells": {"value": "AC372", "label": "A372"}},
+            "TCC + CBRE (Pre-Tax) Gross IRR": {"sheet": "TCC Returns", "cells": {"value": "AC374", "label": "A374"}},
+            "TI CM Fees": {"sheet": "TCC Returns", "cells": {"value": "L27", "label": "A27"}},
+            "Dev Fees": {"sheet": "TCC Returns", "cells": {"value": "L26", "label": "A26"}},
+            "TCC Debt Financing Fee": {"sheet": "TCC Returns", "cells": {"value": "L28", "label": "A28"}},
+            "Partner 1 (Pre-Tax) Gain": {"sheet": "Projected Returns", "cells": {"value": "E142", "label": "A142"}},
+            "Partner 1 (Pre-Tax) IRR": {"sheet": "Projected Returns", "cells": {"value": "D142", "label": "A142"}},
+            "Partner 2 (Pre-Tax) Gain": {"sheet": "Projected Returns", "cells": {"value": "E143", "label": "A143"}},
+            "Partner 2 (Pre-Tax) IRR": {"sheet": "Projected Returns", "cells": {"value": "D143", "label": "A143"}},
+            "NOI to Breakeven (Carry Cost)": {"sheet": "Total Project Costs", "cells": {"value": "G420", "label": "C420"}},
+            "Total Budget": {"sheet": "Total Project Costs", "cells": {"value": "G512", "label": "A512"}},
+            "Total Land Costs": {"sheet": "Total Project Costs", "cells": {"value": "G487", "label": "A487"}},
+            "Total Hard Costs": {"sheet": "Total Project Costs", "cells": {"value": "G494", "label": "A494"}},
+            "Total Soft Costs": {"sheet": "Total Project Costs", "cells": {"value": "G503", "label": "A503"}},
+            "Total Interest Costs": {"sheet": "Total Project Costs", "cells": {"value": "G508", "label": "A508"}},
+            "Total Other Costs": {"sheet": "Total Project Costs", "cells": {"value": "G510", "label": "A510"}},
+            "Preferred Return": {"sheet": "Projected Returns", "cells": {"value": "E98", "label": "C98"}},
+            "Level 1 TCC Equity %": {"sheet": "Projected Returns", "cells": {"value": "F110", "label": "A110"}},
+            "Level 1 Until Partner IRR Equals": {"sheet": "Projected Returns", "cells": {"value": "E112", "label": "A110"}},
+            "Level 2 TCC Equity %": {"sheet": "Projected Returns", "cells": {"value": "F113", "label": "A113"}},
+            "Level 2 Until Partner IRR Equals": {"sheet": "Projected Returns", "cells": {"value": "E115", "label": "A113"}},
+            "Level 3 TCC Equity %": {"sheet": "Projected Returns", "cells": {"value": "F116", "label": "A116"}},
+            "Level 3 Until Partner IRR Equals": {"sheet": "Projected Returns", "cells": {"value": "E118", "label": "A116"}},
+            "Level 4 TCC Equity %": {"sheet": "Projected Returns", "cells": {"value": "F119", "label": "A119"}},
+        }
+    },
+    {
+        "versions": ["Budget Builder 2025A"],
+        "mapping": {
+            "# of Units Market": {"sheet": "Residential Assumptions", "cells": {"value": "B74", "label": "A74"}},
+            "# of Units Affordable": {"sheet": "Residential Assumptions", "cells": {"value": "B131", "label": "A131"}},
+            "Resi - OpEx": {"sheet": "Projected Returns", "cells": {"value": "G29", "label": "A29"}},
+            "Comm - OpEx Leased": {"sheet": "Projected Returns", "cells": {"value": "G15", "label": "A15"}},
+            "Comm - OpEx Vacant": {"sheet": "Projected Returns", "cells": {"value": "G16", "label": "A16"}},
+            "Equity Partner 1": {"sheet": "Projected Returns", "cells": {"value": "C104", "label": "A104"}},
+            "Equity Partner 2": {"sheet": "Projected Returns", "cells": {"value": "C105", "label": "A104"}},
+            "Project IRR": {"sheet": "Projected Returns", "cells": {"value": "D141", "label": "A141"}},
+            "Project Profit $": {"sheet": "Projected Returns", "cells": {"value": "E141", "label": "A141"}},
+            "Project Primary Debt %": {"sheet": "Global Assumptions", "cells": {"value": "C26", "label": "A26"}},
+            "Project Mezzanine Debt %": {"sheet": "Global Assumptions", "cells": {"value": "C27", "label": "A27"}},
+            "TCC (Pre-Tax) Gross Gain": {"sheet": "TCC Returns", "cells": {"value": "D11", "label": "A11"}},
+            "TCC (Pre-Tax) Gross IRR": {"sheet": "TCC Returns", "cells": {"value": "I11", "label": "A11"}},
+            "CBRE LP (Pre-Tax) Gain": {"sheet": "TCC Returns", "cells": {"value": "Y372", "label": "A372"}},
+            "CBRE LP (Pre-Tax) IRR": {"sheet": "TCC Returns", "cells": {"value": "Y374", "label": "A374"}},
+            "TCC (Pre-Tax) Net Gain": {"sheet": "TCC Returns", "cells": {"value": "D12", "label": "A12"}},
+            "TCC (Pre-Tax) Net IRR": {"sheet": "TCC Returns", "cells": {"value": "I12", "label": "A12"}},
+            "TCC + CBRE (Pre-Tax) Net Gain": {"sheet": "TCC Returns", "cells": {"value": "AD372", "label": "A372"}},
+            "TCC + CBRE (Pre-Tax) Net IRR": {"sheet": "TCC Returns", "cells": {"value": "AD374", "label": "A374"}},
+            "TCC + CBRE (Pre-Tax) Gross Gain": {"sheet": "TCC Returns", "cells": {"value": "AC372", "label": "A372"}},
+            "TCC + CBRE (Pre-Tax) Gross IRR": {"sheet": "TCC Returns", "cells": {"value": "AC374", "label": "A374"}},
+            "TI CM Fees": {"sheet": "TCC Returns", "cells": {"value": "L26", "label": "A26"}},
+            "Dev Fees": {"sheet": "TCC Returns", "cells": {"value": "L25", "label": "A25"}},
+            "TCC Debt Financing Fee": {"sheet": "TCC Returns", "cells": {"value": "L27", "label": "A27"}},
+            "Partner 1 (Pre-Tax) Gain": {"sheet": "Projected Returns", "cells": {"value": "E142", "label": "A142"}},
+            "Partner 1 (Pre-Tax) IRR": {"sheet": "Projected Returns", "cells": {"value": "D142", "label": "A142"}},
+            "Partner 2 (Pre-Tax) Gain": {"sheet": "Projected Returns", "cells": {"value": "E143", "label": "A143"}},
+            "Partner 2 (Pre-Tax) IRR": {"sheet": "Projected Returns", "cells": {"value": "D143", "label": "A143"}},
+            "NOI to Breakeven (Carry Cost)": {"sheet": "Total Project Costs", "cells": {"value": "G432", "label": "C432"}},
+            "Total Budget": {"sheet": "Total Project Costs", "cells": {"value": "G525", "label": "A525"}},
+            "Total Land Costs": {"sheet": "Total Project Costs", "cells": {"value": "G499", "label": "A499"}},
+            "Total Hard Costs": {"sheet": "Total Project Costs", "cells": {"value": "G506", "label": "A506"}},
+            "Total Soft Costs": {"sheet": "Total Project Costs", "cells": {"value": "G516", "label": "A516"}},
+            "Total Interest Costs": {"sheet": "Total Project Costs", "cells": {"value": "G521", "label": "A521"}},
+            "Total Other Costs": {"sheet": "Total Project Costs", "cells": {"value": "G523", "label": "A523"}},
+            "Preferred Return": {"sheet": "Projected Returns", "cells": {"value": "E98", "label": "C98"}},
+            "Level 1 TCC Equity %": {"sheet": "Projected Returns", "cells": {"value": "F110", "label": "A110"}},
+            "Level 1 Until Partner IRR Equals": {"sheet": "Projected Returns", "cells": {"value": "E112", "label": "A110"}},
+            "Level 2 TCC Equity %": {"sheet": "Projected Returns", "cells": {"value": "F113", "label": "A113"}},
+            "Level 2 Until Partner IRR Equals": {"sheet": "Projected Returns", "cells": {"value": "E115", "label": "A113"}},
+            "Level 3 TCC Equity %": {"sheet": "Projected Returns", "cells": {"value": "F116", "label": "A116"}},
+            "Level 3 Until Partner IRR Equals": {"sheet": "Projected Returns", "cells": {"value": "E118", "label": "A116"}},
+            "Level 4 TCC Equity %": {"sheet": "Projected Returns", "cells": {"value": "F119", "label": "A119"}},
+        }
+    },
+]
+
+# Default mapping in the new, efficient format
+DEFAULT_MAPPING_COMPACT = {
+    "# of Units Market": {"sheet": "Residential Assumptions", "cells": {"value": "B74", "label": "A74"}},
+    "# of Units Affordable": {"sheet": "Residential Assumptions", "cells": {"value": "B131", "label": "A131"}},
+    "Resi - OpEx": {"sheet": "Projected Returns", "cells": {"value": "G29", "label": "A29"}},
+    "Comm - OpEx Leased": {"sheet": "Projected Returns", "cells": {"value": "G15", "label": "A15"}},
+    "Comm - OpEx Vacant": {"sheet": "Projected Returns", "cells": {"value": "G16", "label": "A16"}},
+    "Equity Partner 1": {"sheet": "Projected Returns", "cells": {"value": "C104", "label": "A104"}},
+    "Equity Partner 2": {"sheet": "Projected Returns", "cells": {"value": "C105", "label": "A104"}},
+    "Project IRR": {"sheet": "Projected Returns", "cells": {"value": "D141", "label": "A141"}},
+    "Project Profit $": {"sheet": "Projected Returns", "cells": {"value": "E141", "label": "A141"}},
+    "Project Primary Debt %": {"sheet": "Global Assumptions", "cells": {"value": "C26", "label": "A26"}},
+    "Project Mezzanine Debt %": {"sheet": "Global Assumptions", "cells": {"value": "C27", "label": "A27"}},
+    "TCC (Pre-Tax) Gross Gain": {"sheet": "TCC Returns", "cells": {"value": "D11", "label": "A11"}},
+    "TCC (Pre-Tax) Gross IRR": {"sheet": "TCC Returns", "cells": {"value": "I11", "label": "A11"}},
+    "CBRE LP (Pre-Tax) Gain": {"sheet": "TCC Returns", "cells": {"value": "Y372", "label": "A372"}},
+    "CBRE LP (Pre-Tax) IRR": {"sheet": "TCC Returns", "cells": {"value": "Y374", "label": "A374"}},
+    "TCC (Pre-Tax) Net Gain": {"sheet": "TCC Returns", "cells": {"value": "D12", "label": "A12"}},
+    "TCC (Pre-Tax) Net IRR": {"sheet": "TCC Returns", "cells": {"value": "I12", "label": "A12"}},
+    "TCC + CBRE (Pre-Tax) Net Gain": {"sheet": "TCC Returns", "cells": {"value": "AD372", "label": "A372"}},
+    "TCC + CBRE (Pre-Tax) Net IRR": {"sheet": "TCC Returns", "cells": {"value": "AD374", "label": "A374"}},
+    "TCC + CBRE (Pre-Tax) Gross Gain": {"sheet": "TCC Returns", "cells": {"value": "AC372", "label": "A372"}},
+    "TCC + CBRE (Pre-Tax) Gross IRR": {"sheet": "TCC Returns", "cells": {"value": "AC374", "label": "A374"}},
+    "TI CM Fees": {"sheet": "TCC Returns", "cells": {"value": "L26", "label": "A26"}},
+    "Dev Fees": {"sheet": "TCC Returns", "cells": {"value": "L25", "label": "A25"}},
+    "TCC Debt Financing Fee": {"sheet": "TCC Returns", "cells": {"value": "L27", "label": "A27"}},
+    "Partner 1 (Pre-Tax) Gain": {"sheet": "Projected Returns", "cells": {"value": "E142", "label": "A142"}},
+    "Partner 1 (Pre-Tax) IRR": {"sheet": "Projected Returns", "cells": {"value": "D142", "label": "A142"}},
+    "Partner 2 (Pre-Tax) Gain": {"sheet": "Projected Returns", "cells": {"value": "E143", "label": "A143"}},
+    "Partner 2 (Pre-Tax) IRR": {"sheet": "Projected Returns", "cells": {"value": "D143", "label": "A143"}},
+    "NOI to Breakeven (Carry Cost)": {"sheet": "Total Project Costs", "cells": {"value": "G434", "label": "C434"}},
+    "Total Budget": {"sheet": "Total Project Costs", "cells": {"value": "G527", "label": "A527"}},
+    "Total Land Costs": {"sheet": "Total Project Costs", "cells": {"value": "G501", "label": "A501"}},
+    "Total Hard Costs": {"sheet": "Total Project Costs", "cells": {"value": "G508", "label": "A508"}},
+    "Total Soft Costs": {"sheet": "Total Project Costs", "cells": {"value": "G518", "label": "A518"}},
+    "Total Interest Costs": {"sheet": "Total Project Costs", "cells": {"value": "G523", "label": "A523"}},
+    "Total Other Costs": {"sheet": "Total Project Costs", "cells": {"value": "G525", "label": "A525"}},
+    "Preferred Return": {"sheet": "Projected Returns", "cells": {"value": "E98", "label": "C98"}},
+    "Level 1 TCC Equity %": {"sheet": "Projected Returns", "cells": {"value": "F110", "label": "A110"}},
+    "Level 1 Until Partner IRR Equals": {"sheet": "Projected Returns", "cells": {"value": "E112", "label": "A110"}},
+    "Level 2 TCC Equity %": {"sheet": "Projected Returns", "cells": {"value": "F113", "label": "A113"}},
+    "Level 2 Until Partner IRR Equals": {"sheet": "Projected Returns", "cells": {"value": "E115", "label": "A113"}},
+    "Level 3 TCC Equity %": {"sheet": "Projected Returns", "cells": {"value": "F116", "label": "A116"}},
+    "Level 3 Until Partner IRR Equals": {"sheet": "Projected Returns", "cells": {"value": "E118", "label": "A116"}},
+    "Level 4 TCC Equity %": {"sheet": "Projected Returns", "cells": {"value": "F119", "label": "A119"}},
+}
+
+# --- GLOBAL MAPPING DICTIONARIES (Generated automatically) ---
+COMMON_FIELDS = expand_mappings(COMMON_FIELDS_COMPACT)
+DEFAULT_MAPPING = expand_mappings(DEFAULT_MAPPING_COMPACT)
+VERSION_GROUPS = [{ "versions": g["versions"], "mapping": expand_mappings(g["mapping"]) } for g in VERSION_GROUPS_COMPACT]
+VERSION_LOOKUP = { v: g["mapping"] for g in VERSION_GROUPS for v in g["versions"] }
+
+def get_version_mapping(version):
+    """Get the cell mapping for a specific version."""
+    return VERSION_LOOKUP.get(str(version).strip(), DEFAULT_MAPPING)
+
+def process_file(file_path):
+    """
+    Worker function to process a single Excel file.
+    Opens the file, determines the version, and extracts all specified data.
+    """
+    filename = os.path.basename(file_path)
+    print(f"Processing: {filename}")
+    model_results = {"File Name": filename}
+    try:
+        workbook = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+        
+        # Get model version
+        raw_version = "Version Not Found"
+        if MODEL_VERSION_SHEET in workbook.sheetnames:
+            raw_version = workbook[MODEL_VERSION_SHEET][MODEL_VERSION_CELL].value
+        model_version = str(raw_version).strip() if raw_version else "Empty/Not Found"
+        model_results["Model Version"] = model_version
+        
+        version_map = get_version_mapping(model_version)
+        
+        # Combine all mappings for this model run
+        combined_map = OrderedDict()
+        combined_map.update(COMMON_FIELDS)
+        combined_map.update(version_map)
+        
+        # Extract data
+        for field, loc in combined_map.items():
+            try:
+                if loc["sheet"] in workbook.sheetnames:
+                    model_results[field] = workbook[loc["sheet"]][loc["cell"]].value
+                else:
+                    model_results[field] = f"Sheet '{loc['sheet']}' not found"
+            except Exception:
+                model_results[field] = f"Error at {loc['sheet']}!{loc['cell']}"
+        
+        workbook.close()
+    except Exception as e:
+        print(f"ERROR processing {filename}: {e}")
+        model_results["Model Version"] = "Processing Error"
+    
+    return model_results
+
+def extract_data_from_models(directory_path):
+    """
+    Finds all Excel files and processes them in parallel using a pool of workers.
+    """
+    files_to_process = [
+        os.path.join(directory_path, f)
+        for f in os.listdir(directory_path)
+        if f.endswith((".xlsx", ".xlsm")) and not f.startswith("~")
+    ]
+    
+    if not files_to_process:
+        print("No Excel files found to process.")
+        return
+
+    # Use a pool of workers to process files in parallel
+    # Uses all available CPU cores for maximum speed
+    with Pool(cpu_count()) as pool:
+        all_model_data = pool.map(process_file, files_to_process)
+
+    # --- Create Master Column List for Final DataFrame ---
+    master_column_list = list(COMMON_FIELDS.keys())
+    seen_columns = set(master_column_list)
+    for group in VERSION_GROUPS:
+        for key in group["mapping"].keys():
+            if key not in seen_columns:
+                master_column_list.append(key)
+                seen_columns.add(key)
+    for key in DEFAULT_MAPPING.keys():
+        if key not in seen_columns:
+            master_column_list.append(key)
+            seen_columns.add(key)
+            
+    final_columns = ["File Name", "Model Version"] + master_column_list
+    
+    # --- Create and Save DataFrame ---
+    df = pd.DataFrame(all_model_data)
+    df = df.reindex(columns=final_columns) # Ensure all columns are present and ordered
+    
+    output_path = os.path.join(os.path.dirname(os.path.abspath(directory_path)), OUTPUT_FILE)
+    df.to_csv(output_path, index=False)
+    print(f"\n{'='*50}\nExtraction complete! Data saved to: {output_path}\n{'='*50}")
+    
+    return df
+
+if __name__ == "__main__":
+    if os.path.isdir(MODELS_DIRECTORY):
+        extract_data_from_models(MODELS_DIRECTORY)
+    else:
+        print(f"Error: Directory not found at '{MODELS_DIRECTORY}'")
